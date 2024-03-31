@@ -1,0 +1,135 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: 1
+  SHELL: /bin/bash
+  CARGO_INCREMENTAL: 0
+  APP_NAME: winterjs
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        features: ["--features debugmozjs", ""]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            target: x86_64-unknown-linux-gnu
+            features: "--features debugmozjs"
+            mode: ""
+            arch: x64
+            executable_extension: ""
+          - os: ubuntu-latest
+            platform: linux
+            target: x86_64-unknown-linux-gnu
+            features: ""
+            mode: --release
+            arch: x64
+            executable_extension: ""
+          - os: macos-latest
+            platform: macos
+            target: x86_64-apple-darwin
+            features: "--features debugmozjs"
+            mode: ""
+            arch: x64
+            executable_extension: ""
+          - os: macos-latest
+            platform: macos
+            target: x86_64-apple-darwin
+            features: ""
+            mode: --release
+            arch: x64
+            executable_extension: ""
+          - os: windows-latest
+            platform: windows
+            target: x86_64-pc-windows-msvc
+            features: "--features debugmozjs"
+            mode: ""
+            arch: x64
+            executable_extension: .exe
+          - os: windows-latest
+            platform: windows
+            target: x86_64-pc-windows-msvc
+            features: ""
+            mode: --release
+            arch: x64
+            executable_extension: .exe
+    env:
+      RUSTC_WRAPPER: sccache
+      CCACHE: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install deps for macos
+        if: startsWith(matrix.os, 'macos')
+        run: brew install python llvm yasm
+
+      - name: Install deps for linux
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt install llvm -y
+
+      - name: Install deps for windows
+        if: startsWith(matrix.os, 'windows')
+        run: |
+          # config extra envs
+          echo "LINKER=lld-link.exe" >> "$GITHUB_ENV"
+          echo "CC=clang-cl" >> "$GITHUB_ENV"
+          echo "CXX=clang-cl" >> "$GITHUB_ENV"
+          export MOZTOOLS_PATH="${{ github.workspace }}\\target\\dependencies\\moztools-4.0"
+          echo "MOZTOOLS_PATH=${MOZTOOLS_PATH}" >> "$GITHUB_ENV"
+          curl -SL "https://github.com/servo/servo-build-deps/releases/download/msvc-deps/moztools-4.0.zip" --create-dirs -o target/dependencies/moztools.zip
+          cd target/dependencies && unzip -qo moztools.zip -d .
+      
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+
+      - name: Build
+        run: |
+          cargo build --target ${{ matrix.target }} ${{ matrix.mode }} --verbose ${{ matrix.features }}
+          # cargo test --verbose ${{ matrix.features }}
+
+      - name: Prepare release files on ${{matrix.platform}}
+        continue-on-error: true
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # for 64-bit binary
+          mv target/x86_64-unknown-linux-gnu/release/${{env.APP_NAME}}${{matrix.executable_extension}} ${{env.APP_NAME}}-${{matrix.platform}}_amd64${{matrix.executable_extension}}
+          mv target/x86_64-unknown-linux-gnu/release/bundle/appimage/${{env.APP_NAME}}_${{ github.event.inputs.tag_version }}_amd64.AppImage ${{env.APP_NAME}}-${{matrix.platform}}_amd64.AppImage
+          mv target/x86_64-unknown-linux-gnu/release/bundle/deb/${{env.APP_NAME}}_${{ github.event.inputs.tag_version }}_amd64.deb ${{env.APP_NAME}}-${{matrix.platform}}_amd64.deb
+      - name: Prepare release files on ${{matrix.platform}}
+        continue-on-error: true
+        if: matrix.os == 'macos-latest'
+        run: |
+          mv target/x86_64-apple-darwin/release/${{env.APP_NAME}}${{matrix.executable_extension}} ${{env.APP_NAME}}-${{matrix.platform}}_x64${{matrix.executable_extension}}
+          mv target/x86_64-apple-darwin/release/bundle/dmg/${{env.APP_NAME}}_${{ github.event.inputs.tag_version }}_x64.dmg ${{env.APP_NAME}}-${{matrix.platform}}_x64.dmg
+          7z a -tzip ${{env.APP_NAME}}-${{matrix.platform}}_x64.app.zip ./target/x86_64-apple-darwin/release/bundle/macos/${{env.APP_NAME}}.app
+      - name: Prepare release files on ${{matrix.platform}}
+        continue-on-error: true
+        if: matrix.os == 'windows-latest'
+        run: |
+          mv target/x86_64-pc-windows-msvc/release/${{env.APP_NAME}}${{matrix.executable_extension}} ${{env.APP_NAME}}-${{matrix.platform}}_x64${{matrix.executable_extension}}
+          mv target/x86_64-pc-windows-msvc/release/bundle/msi/${{env.APP_NAME}}_${{ github.event.inputs.tag_version }}_x64_en-US.msi ${{env.APP_NAME}}-${{matrix.platform}}_x64.msi
+          mv target/x86_64-pc-windows-msvc/release/bundle/nsis/${{env.APP_NAME}}_${{ github.event.inputs.tag_version }}_x64-setup.exe ${{env.APP_NAME}}-${{matrix.platform}}_x64-setup.exe
+         
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{env.APP_NAME}}-${{matrix.platform}}*
+          tag_name: prebuilds
+          release_name: prebuilds
